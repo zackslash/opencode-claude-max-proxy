@@ -158,21 +158,15 @@ Sessions are cached for 24 hours.
 
 ## Concurrency
 
-The proxy supports multiple OpenCode instances. Requests are serialized through a session queue — when one request is using the SDK, others wait. This prevents the SDK subprocess from being overwhelmed.
+The proxy supports multiple simultaneous OpenCode instances. Each request spawns its own independent SDK subprocess — there's no serialization bottleneck. Run as many terminals as you want.
 
-For production use (multiple terminals, background agents), use the auto-restart supervisor:
+For production use, use the auto-restart supervisor:
 
 ```bash
 CLAUDE_PROXY_PASSTHROUGH=1 ./bin/claude-proxy-supervisor.sh
 ```
 
-The supervisor automatically restarts the proxy if the SDK subprocess crashes during cleanup. This is a known Bun limitation with concurrent streaming responses that we're working around.
-
-You can also increase concurrent sessions if your system handles it:
-
-```bash
-CLAUDE_PROXY_MAX_CONCURRENT=2 CLAUDE_PROXY_PASSTHROUGH=1 bun run proxy
-```
+The Bun runtime occasionally crashes during stream cleanup after concurrent requests complete. All responses are delivered correctly — the crash only happens during post-response cleanup. The supervisor detects this and restarts in ~1 second, so subsequent requests work immediately.
 
 ## Model Mapping
 
