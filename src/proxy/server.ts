@@ -202,7 +202,14 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
                 // Preserve ALL content blocks (text, tool_use, thinking, etc.)
                 for (const block of message.message.content) {
-                  contentBlocks.push(block as Record<string, unknown>)
+                  const b = block as Record<string, unknown>
+                  // Normalize task tool_use: lowercase subagent_type
+                  if (b.type === "tool_use" && typeof b.name === "string" &&
+                      (b.name === "task" || b.name === "Task") &&
+                      b.input && typeof (b.input as any).subagent_type === "string") {
+                    (b.input as any).subagent_type = (b.input as any).subagent_type.toLowerCase()
+                  }
+                  contentBlocks.push(b)
                 }
               }
             }
@@ -329,6 +336,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
               }, 15_000)
 
               const skipBlockIndices = new Set<number>()
+              const taskBlockIndices = new Set<number>() // Track task tool blocks for agent name normalization
 
               try {
                 for await (const message of response) {
@@ -359,9 +367,15 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
 
                     if (eventType === "content_block_start") {
                       const block = (event as any).content_block
-                      if (block?.type === "tool_use" && typeof block.name === "string" && block.name.startsWith("mcp__")) {
-                        if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
-                        continue
+                      if (block?.type === "tool_use" && typeof block.name === "string") {
+                        if (block.name.startsWith("mcp__")) {
+                          if (eventIndex !== undefined) skipBlockIndices.add(eventIndex)
+                          continue
+                        }
+                        // Track task tool blocks for agent name normalization
+                        if ((block.name === "task" || block.name === "Task") && eventIndex !== undefined) {
+                          taskBlockIndices.add(eventIndex)
+                        }
                       }
                     }
 
@@ -380,8 +394,28 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}) {
                       }
                     }
 
+                    // Normalize agent names in task tool input_json_delta events
+                    let eventToForward = event
+                    if (eventType === "content_block_delta" && eventIndex !== undefined &&
+                        taskBlockIndices.has(eventIndex)) {
+                      const delta = (event as any).delta
+                      if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") {
+                        // Replace capitalized subagent_type values with lowercase
+                        const normalized = delta.partial_json.replace(
+                          /("subagent_type"\s*:\s*")([^"]+)(")/g,
+                          (_: string, pre: string, name: string, post: string) => `${pre}${name.toLowerCase()}${post}`
+                        )
+                        if (normalized !== delta.partial_json) {
+                          eventToForward = {
+                            ...event,
+                            delta: { ...delta, partial_json: normalized }
+                          }
+                        }
+                      }
+                    }
+
                     // Forward all other events (text, non-MCP tool_use like Task, message events)
-                    const payload = encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(event)}\n\n`)
+                    const payload = encoder.encode(`event: ${eventType}\ndata: ${JSON.stringify(eventToForward)}\n\n`)
                     if (!safeEnqueue(payload, `stream_event:${eventType}`)) {
                       break
                     }
